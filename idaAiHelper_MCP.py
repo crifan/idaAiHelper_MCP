@@ -1,6 +1,6 @@
 # Function: IDA script plugin, exposing comprehensive IDA capabilities as MCP Server
 # Author: Crifan Li
-# Update: 20260303
+# Update: 20260304
 # Feature: Auto-port, Thread-safe, Full Toolset, IDA Action Menu for Start/Stop Control
 
 import sys
@@ -92,6 +92,115 @@ import ida_name
 from mcp.server.fastmcp import FastMCP
 
 # ==============================================================================
+# Suppress noisy MCP framework logs (PingRequest, etc.) and uvicorn access logs
+# ==============================================================================
+import logging
+import glob as globModule
+from datetime import datetime
+
+class _McpFrameworkFilter(logging.Filter):
+  """Filter out MCP framework internal logs like PingRequest."""
+  def filter(self, record):
+    return "PingRequest" not in record.getMessage()
+
+def _suppressNoisyLoggers():
+  """Suppress MCP/uvicorn framework logs. Called on module import."""
+  for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+    logging.getLogger(name).setLevel(logging.WARNING)
+  for name in ("mcp", "mcp.server", "mcp.server.sse", "mcp.server.fastmcp"):
+    lg = logging.getLogger(name)
+    lg.setLevel(logging.WARNING)
+    if not any(isinstance(f, _McpFrameworkFilter) for f in lg.filters):
+      lg.addFilter(_McpFrameworkFilter())
+
+def _disableUvicornAccessLog():
+  """Disable uvicorn access log by modifying its default LOGGING_CONFIG."""
+  try:
+    import uvicorn.config
+    # Set access log handler to NullHandler
+    if hasattr(uvicorn.config, "LOGGING_CONFIG"):
+      uvicorn.config.LOGGING_CONFIG["loggers"]["uvicorn.access"]["handlers"] = []
+  except Exception:
+    pass
+
+_suppressNoisyLoggers()
+_disableUvicornAccessLog()
+
+# ==============================================================================
+# Logging Setup: dual output (IDA Output + file) with auto-cleanup
+# ==============================================================================
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOG_DIR = os.path.join(_SCRIPT_DIR, "logs")
+_LOG_MAX_FILES = 20
+
+class LogUtil:
+  _logger = None
+
+  @staticmethod
+  def setup(binaryNameStr):
+    """Initialize logger with file + IDA console dual output. Call once per server start."""
+    if LogUtil._logger and LogUtil._logger.handlers:
+      # Already initialized, just return
+      return LogUtil._logger
+
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    LogUtil._cleanOldLogs()
+
+    timestampStr = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logFileNameStr = "idaAiHelper_MCP_%s_%s.log" % (binaryNameStr, timestampStr)
+    logFilePathStr = os.path.join(_LOG_DIR, logFileNameStr)
+
+    logger = logging.getLogger("idaAiHelper")
+    logger.setLevel(logging.DEBUG)
+    # Avoid duplicate handlers on re-init
+    logger.handlers.clear()
+
+    formatter = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    # File handler
+    fh = logging.FileHandler(logFilePathStr, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    # Console handler (IDA Output window via sys.stdout)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("[idaAiHelper] %(message)s"))
+    logger.addHandler(ch)
+
+    LogUtil._logger = logger
+    logger.info("Log file: %s" % logFilePathStr)
+    return logger
+
+  @staticmethod
+  def get():
+    """Get the logger. Falls back to a basic logger if setup() not yet called."""
+    if LogUtil._logger:
+      return LogUtil._logger
+    # Fallback: console-only logger before server start
+    logger = logging.getLogger("idaAiHelper")
+    if not logger.handlers:
+      logger.setLevel(logging.DEBUG)
+      ch = logging.StreamHandler(sys.stdout)
+      ch.setLevel(logging.INFO)
+      ch.setFormatter(logging.Formatter("[idaAiHelper] %(message)s"))
+      logger.addHandler(ch)
+    return logger
+
+  @staticmethod
+  def _cleanOldLogs():
+    """Keep only the latest _LOG_MAX_FILES log files."""
+    logFilesList = sorted(globModule.glob(os.path.join(_LOG_DIR, "idaAiHelper_MCP_*.log")))
+    if len(logFilesList) > _LOG_MAX_FILES:
+      for oldFileStr in logFilesList[:-_LOG_MAX_FILES]:
+        try:
+          os.remove(oldFileStr)
+        except OSError:
+          pass
+
+# ==============================================================================
 # Util Classes
 # ==============================================================================
 
@@ -107,7 +216,7 @@ class ConfigUtil:
         with open(CONFIG_FILE_PATH, 'r') as f:
           return json.load(f)
       except Exception as e:
-        print("[idaAiHelper] Warning: Failed to load config: %s" % e)
+        LogUtil.get().warning("Failed to load config: %s" % e)
     return {"portMapping": {}}
 
   @staticmethod
@@ -118,7 +227,7 @@ class ConfigUtil:
       with open(CONFIG_FILE_PATH, 'w') as f:
         json.dump(configDict, f, indent=2)
     except Exception as e:
-      print("[idaAiHelper] Warning: Failed to save config: %s" % e)
+      LogUtil.get().warning("Failed to save config: %s" % e)
 
   @staticmethod
   def getPortForBinary(safeNameStr):
@@ -165,7 +274,7 @@ class NetworkUtil:
       if NetworkUtil.isPortAvailable(savedPortInt):
         return savedPortInt
       else:
-        print("[idaAiHelper] Warning: Saved port %d for '%s' is occupied, finding new port..." % (savedPortInt, safeNameStr))
+        LogUtil.get().warning("Saved port %d for '%s' is occupied, finding new port..." % (savedPortInt, safeNameStr))
     # Find new available port and save it
     newPortInt = NetworkUtil.findAvailablePort(startPortInt, maxPortInt)
     if newPortInt:
@@ -188,7 +297,7 @@ class IDAThreadUtil:
 
     idaapi.execute_sync(wrapper, idaapi.MFF_WRITE)
     if exceptionList[0]:
-      print("[idaAiHelper] ExecuteSync Exception: %s" % exceptionList[0])
+      LogUtil.get().error("ExecuteSync Exception: %s" % exceptionList[0])
       return "Error: %s" % exceptionList[0]
     return resultList[0]
 
@@ -243,8 +352,8 @@ class IDAUtil:
     return isSuccess
 
   @staticmethod
-  def _setComment(ea, commentStr, isFunctionBool=False):
-    if isFunctionBool:
+  def _setComment(ea, commentStr, commentTypeStr="asm"):
+    if commentTypeStr == "function":
       funcObj = idaapi.get_func(ea)
       isSuccess = idc.set_func_cmt(funcObj.start_ea, commentStr, 1) if funcObj else False
     else:
@@ -359,9 +468,9 @@ class IDAMCPServer:
       """Get decompiled pseudo code. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      print("[idaAiHelper] Tool called: get_ida_pseudo_code(0x%X)" % addr)
+      LogUtil.get().info("Tool called: get_ida_pseudo_code(ea=0x%X)" % addr)
       r = IDAThreadUtil.executeSync(IDAUtil._getPseudoCode, addr)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
@@ -369,9 +478,9 @@ class IDAMCPServer:
       """Get assembly code. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      print("[idaAiHelper] Tool called: get_ida_asm_code(0x%X)" % addr)
+      LogUtil.get().info("Tool called: get_ida_asm_code(ea=0x%X)" % addr)
       r = IDAThreadUtil.executeSync(IDAUtil._getAssemblyCode, addr)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
@@ -379,9 +488,9 @@ class IDAMCPServer:
       """Get cross references TO address. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      print("[idaAiHelper] Tool called: get_ida_xrefs_to(0x%X)" % addr)
+      LogUtil.get().info("Tool called: get_ida_xrefs_to(ea=0x%X)" % addr)
       r = IDAThreadUtil.executeSync(IDAUtil._getXrefsTo, addr)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
@@ -389,9 +498,9 @@ class IDAMCPServer:
       """Get cross references FROM address. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      print("[idaAiHelper] Tool called: get_ida_xrefs_from(0x%X)" % addr)
+      LogUtil.get().info("Tool called: get_ida_xrefs_from(ea=0x%X)" % addr)
       r = IDAThreadUtil.executeSync(IDAUtil._getXrefsFrom, addr)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
@@ -399,36 +508,45 @@ class IDAMCPServer:
       """Read string at address. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return IDAThreadUtil.executeSync(IDAUtil._getStringAtEa, addr, maxLength)
+      LogUtil.get().info("Tool called: read_ida_string(ea=0x%X, maxLength=%d)" % (addr, maxLength))
+      r = IDAThreadUtil.executeSync(IDAUtil._getStringAtEa, addr, maxLength)
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
+      return r
 
     @self.mcpObj.tool()
     def read_ida_raw_bytes(ea: str, size: int) -> str:
       """Read raw bytes. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return IDAThreadUtil.executeSync(IDAUtil._getRawBytes, addr, size)
+      LogUtil.get().info("Tool called: read_ida_raw_bytes(ea=0x%X, size=%d)" % (addr, size))
+      r = IDAThreadUtil.executeSync(IDAUtil._getRawBytes, addr, size)
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
+      return r
 
     @self.mcpObj.tool()
     def read_ida_pointer(ea: str) -> str:
       """Read pointer at address. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return IDAThreadUtil.executeSync(IDAUtil._readPointer, addr)
+      LogUtil.get().info("Tool called: read_ida_pointer(ea=0x%X)" % addr)
+      r = IDAThreadUtil.executeSync(IDAUtil._readPointer, addr)
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
+      return r
 
     @self.mcpObj.tool()
     def get_ida_exports() -> str:
       """Get all exports."""
-      print("[idaAiHelper] Tool called: get_ida_exports()")
+      LogUtil.get().info("Tool called: get_ida_exports()")
       r = IDAThreadUtil.executeSync(IDAUtil._getExports)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
     def get_ida_segments() -> str:
       """Get all segments info."""
-      print("[idaAiHelper] Tool called: get_ida_segments()")
+      LogUtil.get().info("Tool called: get_ida_segments()")
       r = IDAThreadUtil.executeSync(IDAUtil._getSegmentsInfo)
-      print("[idaAiHelper] Tool result: %s" % (r[:200] if r else repr(r)))
+      LogUtil.get().info("Tool result: %s" % (r[:200] if r else repr(r)))
       return r
 
     @self.mcpObj.tool()
@@ -436,64 +554,85 @@ class IDAMCPServer:
       """Rename symbol. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return "Success" if IDAThreadUtil.executeSync(IDAUtil._renameSymbol, addr, newName) else "Failed"
+      LogUtil.get().info("Tool called: rename_ida_symbol(ea=0x%X, newName='%s')" % (addr, newName))
+      r = "Success" if IDAThreadUtil.executeSync(IDAUtil._renameSymbol, addr, newName) else "Failed"
+      LogUtil.get().info("Tool result: %s" % r)
+      return r
 
     @self.mcpObj.tool()
-    def set_ida_comment(ea: str, comment: str, isFunction: bool) -> str:
-      """Set comment. ea: hex string '0x...', decimal, or symbol name."""
+    def set_ida_comment(ea: str, comment: str, commentType: str) -> str:
+      """Set comment. ea: hex string '0x...', decimal, or symbol name. commentType: "function" for function-level comment (displayed at function header), "asm" for address-level comment (displayed next to the assembly line)."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return "Success" if IDAThreadUtil.executeSync(IDAUtil._setComment, addr, comment, isFunction) else "Failed"
+      if commentType not in ("function", "asm"):
+        return "Error: commentType must be 'function' or 'asm', got '%s'" % commentType
+      LogUtil.get().info("Tool called: set_ida_comment(ea=0x%X, comment='%s', commentType=%s)" % (addr, comment[:80], commentType))
+      r = "Success" if IDAThreadUtil.executeSync(IDAUtil._setComment, addr, comment, commentType) else "Failed"
+      LogUtil.get().info("Tool result: %s" % r)
+      return r
 
     @self.mcpObj.tool()
     def set_ida_function_type(ea: str, typeSignature: str) -> str:
       """Set function type signature. ea: hex string '0x...', decimal, or symbol name."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
-      return "Success" if IDAThreadUtil.executeSync(IDAUtil._setFunctionType, addr, typeSignature) else "Failed"
+      LogUtil.get().info("Tool called: set_ida_function_type(ea=0x%X, typeSignature='%s')" % (addr, typeSignature[:100]))
+      r = "Success" if IDAThreadUtil.executeSync(IDAUtil._setFunctionType, addr, typeSignature) else "Failed"
+      LogUtil.get().info("Tool result: %s" % r)
+      return r
 
     @self.mcpObj.tool()
     def add_ida_c_struct(cStructCode: str) -> str:
       """Add C struct definition to IDA types."""
-      return "Success" if IDAThreadUtil.executeSync(IDAUtil._addCStruct, cStructCode) else "Failed"
+      LogUtil.get().info("Tool called: add_ida_c_struct(cStructCode='%s')" % cStructCode[:100])
+      r = "Success" if IDAThreadUtil.executeSync(IDAUtil._addCStruct, cStructCode) else "Failed"
+      LogUtil.get().info("Tool result: %s" % r)
+      return r
 
   def start(self):
     if self.isRunningBool:
-      print("[idaAiHelper] Warning: MCP Server '%s' is already running on port %s." % (self.serverNameStr, self.serverPortInt))
+      LogUtil.get().warning("MCP Server '%s' is already running on port %s." % (self.serverNameStr, self.serverPortInt))
       return
       
     self.serverPortInt = NetworkUtil.getPortForBinary(self.safeFileNameStr, 8080, 8099)
     if not self.serverPortInt:
-      print("[idaAiHelper] Error: No available ports for '%s'." % self.serverNameStr)
+      LogUtil.get().error("No available ports for '%s'." % self.serverNameStr)
       return
 
+    # Initialize file logging now that we know the binary name
+    LogUtil.setup(self.safeFileNameStr)
+
     def run_mcp_loop():
+      # Re-apply uvicorn access log suppression in server thread
+      _disableUvicornAccessLog()
       self.loopObj = asyncio.new_event_loop()
       asyncio.set_event_loop(self.loopObj)
       self.mcpObj.settings.port = self.serverPortInt
       try:
         self.mcpObj.run(transport="sse")
       except Exception as e:
-        print("[idaAiHelper] Server '%s' stopped unexpectedly: %s" % (self.serverNameStr, e))
+        LogUtil.get().error("Server '%s' stopped unexpectedly: %s" % (self.serverNameStr, e))
 
     self.serverThreadObj = threading.Thread(target=run_mcp_loop)
     self.serverThreadObj.daemon = True
     self.serverThreadObj.start()
     self.isRunningBool = True
     
-    print("\n" + "="*65)
-    print("[idaAiHelper] >>> STARTED MCP Server : %s" % self.serverNameStr)
-    print("[idaAiHelper] >>> Listening on URL : http://localhost:%d%s/sse" % (self.serverPortInt, self.mountPathStr))
-    print("="*65 + "\n")
+    LogUtil.get().info("")
+    LogUtil.get().info("=" * 60)
+    LogUtil.get().info(">>> STARTED MCP Server : %s" % self.serverNameStr)
+    LogUtil.get().info(">>> Listening on URL : http://localhost:%d%s/sse" % (self.serverPortInt, self.mountPathStr))
+    LogUtil.get().info("=" * 60)
 
   def stop(self):
     if not self.isRunningBool or not self.loopObj:
       return
       
-    print("\n" + "="*65)
-    print("[idaAiHelper] >>> STOPPED MCP Server : %s" % self.serverNameStr)
-    print("[idaAiHelper] >>> Released Port    : %s" % self.serverPortInt)
-    print("="*65 + "\n")
+    LogUtil.get().info("")
+    LogUtil.get().info("=" * 60)
+    LogUtil.get().info(">>> STOPPED MCP Server : %s" % self.serverNameStr)
+    LogUtil.get().info(">>> Released Port    : %s" % self.serverPortInt)
+    LogUtil.get().info("=" * 60)
     
     # Safely shut down the asyncio event loop to release the port
     self.loopObj.call_soon_threadsafe(self.loopObj.stop)
@@ -570,13 +709,13 @@ class IDAMCPPlugin(idaapi.plugin_t):
     idaapi.attach_action_to_menu("Edit/MCP Server/Start", self.actionStartNameStr, idaapi.SETMENU_APP)
     idaapi.attach_action_to_menu("Edit/MCP Server/Stop", self.actionStopNameStr, idaapi.SETMENU_APP)
 
-    print(f"[idaAiHelper] Plugin loaded for '{self.expectedServerNameStr}'. Check 'Edit -> MCP Server' menu.")
+    LogUtil.get().info("Plugin loaded for '%s'. Check 'Edit -> MCP Server' menu." % self.expectedServerNameStr)
     return idaapi.PLUGIN_KEEP
 
   def actionStart(self):
     # 校验是否已启动，并带上详细名称和端口提示
     if self.mcpServerObj and self.mcpServerObj.isRunningBool:
-      print("[idaAiHelper] Action Ignore: Server '%s' is ALREADY running on port %s!" % (self.mcpServerObj.serverNameStr, self.mcpServerObj.serverPortInt))
+      LogUtil.get().info("Action Ignore: Server '%s' is ALREADY running on port %s!" % (self.mcpServerObj.serverNameStr, self.mcpServerObj.serverPortInt))
       return
       
     self.mcpServerObj = IDAMCPServer()
@@ -587,7 +726,7 @@ class IDAMCPPlugin(idaapi.plugin_t):
     if self.mcpServerObj and self.mcpServerObj.isRunningBool:
       self.mcpServerObj.stop()
     else:
-      print("[idaAiHelper] Action Ignore: Server '%s' is NOT running right now." % self.expectedServerNameStr)
+      LogUtil.get().info("Action Ignore: Server '%s' is NOT running right now." % self.expectedServerNameStr)
 
   def run(self, arg):
     pass
