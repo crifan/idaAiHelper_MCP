@@ -1,6 +1,6 @@
 # idaAiHelper_MCP
 
-* Update: `20260303`
+* Update: `20260304`
 
 ## Function
 
@@ -13,6 +13,7 @@ Features:
 - **Full Toolset**: 13 MCP tools covering decompilation, assembly, xrefs, renaming, commenting, type setting, struct definition, memory reading, exports and segments
 - **Flexible Address**: Support hex string, decimal, or symbol name for all address parameters
 - **Menu Control**: Start/Stop MCP Server from IDA menu (`Edit` -> `MCP Server`) or hotkeys
+- **Logging**: Dual output to IDA Output window and log files with auto-cleanup
 
 ## Git Repo
 
@@ -96,7 +97,7 @@ Example MCP client config (for multiple IDA instances):
 | `get_ida_exports()` | Get all exports of the binary |
 | `get_ida_segments()` | Get all segments info |
 | `rename_ida_symbol(ea, newName)` | Rename symbol at address |
-| `set_ida_comment(ea, comment, isFunction)` | Set comment at address |
+| `set_ida_comment(ea, comment, commentType)` | Set comment at address. commentType: "function" or "asm" |
 | `set_ida_function_type(ea, typeSignature)` | Set function type signature |
 | `add_ida_c_struct(cStructCode)` | Add C struct definition to IDA |
 
@@ -119,4 +120,21 @@ Example config file:
     "libmtguard_so": 8081
   }
 }
+```
+
+### Logging
+
+Log files are saved to `logs/` subdirectory (same location as the plugin script) with format:
+```
+idaAiHelper_MCP_{binaryName}_{YYYYMMDD_HHMMSS}.log
+```
+
+- **IDA Output**: Shows tool calls in real-time with `[idaAiHelper]` prefix
+- **Log files**: Detailed timestamps for debugging and audit trail
+- **Auto-cleanup**: Only keeps the latest 20 log files
+
+Example log output:
+```
+[2026-03-04 15:30:00][INFO] Tool called: rename_ida_symbol(ea=0x74C7C, newName='addMxxxParamToJson_74C7C')
+[2026-03-04 15:30:00][INFO] Tool result: Success
 ```
