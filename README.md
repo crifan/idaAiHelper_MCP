@@ -1,6 +1,6 @@
 # idaAiHelper_MCP
 
-* Update: `20260304`
+* Update: `20260305`
 
 ## Function
 
