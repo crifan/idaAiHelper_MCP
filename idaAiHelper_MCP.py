@@ -1,6 +1,6 @@
 # Function: IDA script plugin, exposing comprehensive IDA capabilities as MCP Server
 # Author: Crifan Li
-# Update: 20260304
+# Update: 20260305
 # Feature: Auto-port, Thread-safe, Full Toolset, IDA Action Menu for Start/Stop Control
 
 import sys
