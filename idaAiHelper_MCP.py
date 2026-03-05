@@ -153,6 +153,7 @@ class LogUtil:
 
     logger = logging.getLogger("idaAiHelper")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # Prevent duplicate output via root logger
     # Avoid duplicate handlers on re-init
     logger.handlers.clear()
 
@@ -183,6 +184,7 @@ class LogUtil:
     logger = logging.getLogger("idaAiHelper")
     if not logger.handlers:
       logger.setLevel(logging.DEBUG)
+      logger.propagate = False
       ch = logging.StreamHandler(sys.stdout)
       ch.setLevel(logging.INFO)
       ch.setFormatter(logging.Formatter("[idaAiHelper] %(message)s"))
