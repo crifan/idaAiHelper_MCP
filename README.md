@@ -53,7 +53,7 @@ IDA Output window will show:
 ```
 =================================================================
 [idaAiHelper] >>> STARTED MCP Server : IDA_MCP_yourBinaryName
-[idaAiHelper] >>> Listening on URL : http://localhost:8080/yourBinaryName/sse
+[idaAiHelper] >>> Listening on URL : http://127.0.0.1:8080/yourBinaryName/sse
 =================================================================
 ```
 
@@ -67,10 +67,10 @@ Example MCP client config (for multiple IDA instances):
 {
   "mcpServers": {
     "ida_PerimeterX_SDK": {
-      "url": "http://localhost:8080/PerimeterX_SDK/sse"
+      "url": "http://127.0.0.1:8080/PerimeterX_SDK/sse"
     },
     "ida_libmtguard_so": {
-      "url": "http://localhost:8081/libmtguard_so/sse"
+      "url": "http://127.0.0.1:8081/libmtguard_so/sse"
     }
   }
 }

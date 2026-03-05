@@ -607,6 +607,7 @@ class IDAMCPServer:
       _disableUvicornAccessLog()
       self.loopObj = asyncio.new_event_loop()
       asyncio.set_event_loop(self.loopObj)
+      self.mcpObj.settings.host = "127.0.0.1"
       self.mcpObj.settings.port = self.serverPortInt
       try:
         self.mcpObj.run(transport="sse")
@@ -621,7 +622,7 @@ class IDAMCPServer:
     LogUtil.get().info("")
     LogUtil.get().info("=" * 60)
     LogUtil.get().info(">>> STARTED MCP Server : %s" % self.serverNameStr)
-    LogUtil.get().info(">>> Listening on URL : http://localhost:%d%s/sse" % (self.serverPortInt, self.mountPathStr))
+    LogUtil.get().info(">>> Listening on URL : http://127.0.0.1:%d%s/sse" % (self.serverPortInt, self.mountPathStr))
     LogUtil.get().info("=" * 60)
 
   def stop(self):
