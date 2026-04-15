@@ -430,6 +430,25 @@ class IDAUtil:
     return "Pointer at 0x%X -> 0x%X" % (ea, ptrInt)
 
   @staticmethod
+  def _batchOperation(eaStrList, operationFunc):
+    """Execute operationFunc for multiple addresses in a single main-thread call.
+    Returns formatted results with separators. Partial failures are reported inline.
+    """
+    resultList = []
+    for eaStr in eaStrList:
+      ea, err = IDAUtil.parseAddress(eaStr)
+      if err:
+        resultList.append("=== %s ===\nError: %s" % (eaStr, err))
+        continue
+      nameStr = idc.get_func_name(ea) or idc.get_name(ea, ida_name.GN_VISIBLE) or ("0x%X" % ea)
+      try:
+        data = operationFunc(ea)
+        resultList.append("=== %s (0x%X) ===\n%s" % (nameStr, ea, data))
+      except Exception as e:
+        resultList.append("=== %s (0x%X) ===\nError: %s" % (nameStr, ea, e))
+    return "\n\n".join(resultList)
+
+  @staticmethod
   def _getExports():
     exportList = [f"0x{ea:X} : {name}" for i, o, ea, name in idautils.Entries() if name]
     return "\n".join(exportList) if exportList else "No exports found."
@@ -591,6 +610,53 @@ class IDAMCPServer:
       LogUtil.get().info("Tool result: %s" % r)
       return r
 
+    # -------------------- Batch Tools --------------------
+
+    def _parseBatchEaList(eaListStr):
+      """Parse comma-separated ea_list string into a list of stripped, non-empty strings."""
+      eaStrList = [s.strip() for s in eaListStr.split(",") if s.strip()]
+      return eaStrList
+
+    @self.mcpObj.tool()
+    def get_ida_asm_code_batch(ea_list: str) -> str:
+      """Get assembly code for multiple functions in one call. ea_list: comma-separated hex addresses '0x...', decimals, or symbol names. Example: 'sub_39B18,sub_39B5C,0x3A21C'"""
+      eaStrList = _parseBatchEaList(ea_list)
+      if not eaStrList: return "Error: ea_list is empty"
+      LogUtil.get().info("Tool called: get_ida_asm_code_batch(%d addresses: %s)" % (len(eaStrList), ea_list[:120]))
+      r = IDAThreadUtil.executeSync(IDAUtil._batchOperation, eaStrList, IDAUtil._getAssemblyCode)
+      LogUtil.get().info("Tool result: %d chars" % (len(r) if r else 0))
+      return r
+
+    @self.mcpObj.tool()
+    def get_ida_pseudo_code_batch(ea_list: str) -> str:
+      """Get decompiled pseudo code for multiple functions in one call. ea_list: comma-separated hex addresses '0x...', decimals, or symbol names. Example: 'sub_39B18,sub_39B5C,0x3A21C'"""
+      eaStrList = _parseBatchEaList(ea_list)
+      if not eaStrList: return "Error: ea_list is empty"
+      LogUtil.get().info("Tool called: get_ida_pseudo_code_batch(%d addresses: %s)" % (len(eaStrList), ea_list[:120]))
+      r = IDAThreadUtil.executeSync(IDAUtil._batchOperation, eaStrList, IDAUtil._getPseudoCode)
+      LogUtil.get().info("Tool result: %d chars" % (len(r) if r else 0))
+      return r
+
+    @self.mcpObj.tool()
+    def get_ida_xrefs_to_batch(ea_list: str) -> str:
+      """Get cross references TO multiple addresses in one call. ea_list: comma-separated hex addresses '0x...', decimals, or symbol names. Example: 'sub_39B18,sub_39B5C,0x3A21C'"""
+      eaStrList = _parseBatchEaList(ea_list)
+      if not eaStrList: return "Error: ea_list is empty"
+      LogUtil.get().info("Tool called: get_ida_xrefs_to_batch(%d addresses: %s)" % (len(eaStrList), ea_list[:120]))
+      r = IDAThreadUtil.executeSync(IDAUtil._batchOperation, eaStrList, IDAUtil._getXrefsTo)
+      LogUtil.get().info("Tool result: %d chars" % (len(r) if r else 0))
+      return r
+
+    @self.mcpObj.tool()
+    def get_ida_xrefs_from_batch(ea_list: str) -> str:
+      """Get cross references FROM multiple addresses in one call. ea_list: comma-separated hex addresses '0x...', decimals, or symbol names. Example: 'sub_39B18,sub_39B5C,0x3A21C'"""
+      eaStrList = _parseBatchEaList(ea_list)
+      if not eaStrList: return "Error: ea_list is empty"
+      LogUtil.get().info("Tool called: get_ida_xrefs_from_batch(%d addresses: %s)" % (len(eaStrList), ea_list[:120]))
+      r = IDAThreadUtil.executeSync(IDAUtil._batchOperation, eaStrList, IDAUtil._getXrefsFrom)
+      LogUtil.get().info("Tool result: %d chars" % (len(r) if r else 0))
+      return r
+
   def start(self):
     if self.isRunningBool:
       LogUtil.get().warning("MCP Server '%s' is already running on port %s." % (self.serverNameStr, self.serverPortInt))
@@ -630,17 +696,23 @@ class IDAMCPServer:
   def stop(self):
     if not self.isRunningBool or not self.loopObj:
       return
-      
+
+    stoppedPortInt = self.serverPortInt
     LogUtil.get().info("")
     LogUtil.get().info("=" * 60)
-    LogUtil.get().info(">>> STOPPED MCP Server : %s" % self.serverNameStr)
-    LogUtil.get().info(">>> Released Port    : %s" % self.serverPortInt)
+    LogUtil.get().info(">>> STOPPING MCP Server : %s" % self.serverNameStr)
     LogUtil.get().info("=" * 60)
     
     # Safely shut down the asyncio event loop to release the port
     self.loopObj.call_soon_threadsafe(self.loopObj.stop)
     self.isRunningBool = False
     self.serverPortInt = None
+
+    # Wait for server thread to finish so the port is fully released
+    if self.serverThreadObj and self.serverThreadObj.is_alive():
+      self.serverThreadObj.join(timeout=3.0)
+
+    LogUtil.get().info(">>> STOPPED. Released Port : %s" % stoppedPortInt)
 
 # ==============================================================================
 # IDA Plugin & Action Registration
@@ -688,13 +760,13 @@ class IDAMCPPlugin(idaapi.plugin_t):
     # 预先存下预期的 Server Name，方便在服务未启动时打印
     self.expectedServerNameStr = "IDA_MCP_%s" % safeTargetNameStr
 
-    # 1. 注册 Start 动作
+    # 1. 注册 (Re)Start 动作
     idaapi.register_action(idaapi.action_desc_t(
       self.actionStartNameStr,
-      f"Start MCP Server: {self.expectedServerNameStr}",
+      f"(Re)Start MCP Server: {self.expectedServerNameStr}",
       ActionStartMCP(self),
       "Ctrl+Alt+S",
-      "Start the AI MCP Server",
+      "(Re)Start the AI MCP Server — auto-reloads plugin code from disk",
       199 # Icon ID
     ))
 
@@ -716,11 +788,25 @@ class IDAMCPPlugin(idaapi.plugin_t):
     return idaapi.PLUGIN_KEEP
 
   def actionStart(self):
-    # 校验是否已启动，并带上详细名称和端口提示
+    # If already running, stop first (supports restart)
     if self.mcpServerObj and self.mcpServerObj.isRunningBool:
-      LogUtil.get().info("Action Ignore: Server '%s' is ALREADY running on port %s!" % (self.mcpServerObj.serverNameStr, self.mcpServerObj.serverPortInt))
-      return
-      
+      LogUtil.get().info("Stopping existing server for restart...")
+      self.mcpServerObj.stop()
+      self.mcpServerObj = None
+
+    # Auto-reload module from disk so code changes take effect without restarting IDA.
+    # IDA uses mangled module names ('__plugins__xxx') that break importlib.reload(),
+    # so we exec the file directly into the module's namespace instead.
+    thisModule = sys.modules.get(self.__class__.__module__)
+    if thisModule:
+      pluginFilePath = os.path.realpath(os.path.join(_SCRIPT_DIR, 'idaAiHelper_MCP.py'))
+      try:
+        with open(pluginFilePath, 'r', encoding='utf-8') as f:
+          exec(compile(f.read(), pluginFilePath, 'exec'), thisModule.__dict__)
+        LogUtil.get().info("Reloaded module from: %s" % pluginFilePath)
+      except Exception as e:
+        LogUtil.get().warning("Module reload failed (using cached code): %s" % e)
+
     self.mcpServerObj = IDAMCPServer()
     self.mcpServerObj.start()
 
