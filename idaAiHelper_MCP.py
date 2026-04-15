@@ -1,6 +1,6 @@
 # Function: IDA script plugin, exposing comprehensive IDA capabilities as MCP Server
 # Author: Crifan Li
-# Update: 20260305
+# Update: 20260415
 # Feature: Auto-port, Thread-safe, Full Toolset, IDA Action Menu for Start/Stop Control
 
 import sys
@@ -517,7 +517,7 @@ class IDAMCPServer:
 
     @self.mcpObj.tool()
     def read_ida_raw_bytes(ea: str, size: int) -> str:
-      """Read raw bytes. ea: hex string '0x...', decimal, or symbol name."""
+      """Read raw bytes from address. ea: hex string '0x...', decimal, or symbol name. size: number of bytes to read (required, e.g. 16, 64, 256)."""
       addr, err = _parseEa(ea)
       if err: return "Error: %s" % err
       LogUtil.get().info("Tool called: read_ida_raw_bytes(ea=0x%X, size=%d)" % (addr, size))
