@@ -1,12 +1,16 @@
 # idaAiHelper_MCP
 
-* Update: `20260415`
+* Update: `20260416`
 
-## Function
+## Intro
 
-IDA Plugin, exposing comprehensive IDA capabilities as [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) Server, enabling AI assistants (Claude, Cursor, etc.) to directly interact with IDA Pro for reverse engineering tasks.
+IDA Plugin, exposing comprehensive IDA capabilities as [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) Server, enabling AI assistants (Qoder, Claude, Cursor, etc.) to directly interact with IDA Pro for reverse engineering tasks.
 
-Features:
+## Usage Effect
+
+![ida_mcp_qoder_effect](./docs/img/ida_mcp_qoder_effect.jpg)
+
+## Features
 
 - **Auto Port**: Automatically finds available port (8080-8099), with persistent port mapping per binary
 - **Thread Safe**: All IDA API calls are safely executed on the main thread via `execute_sync`
