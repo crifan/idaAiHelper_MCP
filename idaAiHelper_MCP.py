@@ -1,6 +1,6 @@
 # Function: IDA script plugin, exposing comprehensive IDA capabilities as MCP Server
 # Author: Crifan Li
-# Update: 20260415
+# Update: 20260429
 # Feature: Auto-port, Thread-safe, Full Toolset, IDA Action Menu for Start/Stop Control
 
 import sys
@@ -123,8 +123,35 @@ def _disableUvicornAccessLog():
   except Exception:
     pass
 
+def _patchMcpSseClosedResource():
+  """Monkey-patch mcp library's SSE transport to handle ClosedResourceError gracefully.
+
+  The mcp library (tested on v1.26.0) has a race condition in SseServerTransport.handle_post_message:
+  when the SSE connection drops (client timeout/disconnect), the session streams are closed, but a
+  concurrent POST handler may still try to write to the closed stream, raising ClosedResourceError.
+  This patch catches that exception so it doesn't crash the ASGI server.
+  """
+  try:
+    from mcp.server.sse import SseServerTransport
+    import anyio
+
+    _origHandlePost = SseServerTransport.handle_post_message
+
+    async def _safeHandlePost(self, scope, receive, send):
+      try:
+        await _origHandlePost(self, scope, receive, send)
+      except anyio.ClosedResourceError:
+        logging.getLogger("idaAiHelper").debug(
+          "SSE session closed during POST handling (client disconnected) — ignored."
+        )
+
+    SseServerTransport.handle_post_message = _safeHandlePost
+  except Exception:
+    pass
+
 _suppressNoisyLoggers()
 _disableUvicornAccessLog()
+_patchMcpSseClosedResource()
 
 # ==============================================================================
 # Logging Setup: dual output (IDA Output + file) with auto-cleanup

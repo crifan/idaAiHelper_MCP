@@ -1,6 +1,6 @@
 # idaAiHelper_MCP
 
-* Update: `20260417`
+* Update: `20260429`
 
 ## Intro
 
@@ -20,6 +20,7 @@ IDA Plugin, exposing comprehensive IDA capabilities as [MCP (Model Context Proto
 - **Menu Control**: (Re)Start/Stop MCP Server from IDA menu (`Edit` -> `MCP Server`) or hotkeys
 - **Hot Reload**: (Re)Start auto-reloads plugin code from disk — no need to restart IDA after code changes
 - **Logging**: Dual output to IDA Output window and log files with auto-cleanup
+- **SSE Robustness**: Auto-patches mcp library's SSE transport to gracefully handle client disconnects (prevents `ClosedResourceError` crashes)
 
 ## Git Repo
 
